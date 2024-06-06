@@ -51,6 +51,23 @@ static const AVCodecTag flv_video_codec_ids[] = {
     { AV_CODEC_ID_VP6,      FLV_CODECID_VP6 },
     { AV_CODEC_ID_VP6A,     FLV_CODECID_VP6A },
     { AV_CODEC_ID_H264,     FLV_CODECID_H264 },
+    { AV_CODEC_ID_HEVC,     FLV_CODECID_HEVC },
+    { AV_CODEC_ID_AV1,      FLV_CODECID_AV1 },
+    { AV_CODEC_ID_VP8,      FLV_CODECID_VP8 },
+    { AV_CODEC_ID_VP9,      FLV_CODECID_VP9 },
+    { AV_CODEC_ID_NONE,     0 }
+};
+
+static const AVCodecTag flv_enhanced_video_codec_ids[] = {
+    { AV_CODEC_ID_FLV1,     FLV_CODECID_H263 },
+    { AV_CODEC_ID_H263,     FLV_CODECID_REALH263 },
+    { AV_CODEC_ID_MPEG4,    FLV_CODECID_MPEG4 },
+    { AV_CODEC_ID_FLASHSV,  FLV_CODECID_SCREEN },
+    { AV_CODEC_ID_FLASHSV2, FLV_CODECID_SCREEN2 },
+    { AV_CODEC_ID_VP6F,     FLV_CODECID_VP6 },
+    { AV_CODEC_ID_VP6,      FLV_CODECID_VP6 },
+    { AV_CODEC_ID_VP6A,     FLV_CODECID_VP6A },
+    { AV_CODEC_ID_H264,     FLV_CODECID_H264 },
     { AV_CODEC_ID_HEVC,     MKBETAG('h', 'v', 'c', '1') },
     { AV_CODEC_ID_AV1,      MKBETAG('a', 'v', '0', '1') },
     { AV_CODEC_ID_VP9,      MKBETAG('v', 'p', '0', '9') },
@@ -64,6 +81,7 @@ static const AVCodecTag flv_audio_codec_ids[] = {
     { AV_CODEC_ID_PCM_S16LE,  FLV_CODECID_PCM_LE     >> FLV_AUDIO_CODECID_OFFSET },
     { AV_CODEC_ID_ADPCM_SWF,  FLV_CODECID_ADPCM      >> FLV_AUDIO_CODECID_OFFSET },
     { AV_CODEC_ID_AAC,        FLV_CODECID_AAC        >> FLV_AUDIO_CODECID_OFFSET },
+    { AV_CODEC_ID_OPUS,       FLV_CODECID_OPUS       >> FLV_AUDIO_CODECID_OFFSET },
     { AV_CODEC_ID_NELLYMOSER, FLV_CODECID_NELLYMOSER >> FLV_AUDIO_CODECID_OFFSET },
     { AV_CODEC_ID_PCM_MULAW,  FLV_CODECID_PCM_MULAW  >> FLV_AUDIO_CODECID_OFFSET },
     { AV_CODEC_ID_PCM_ALAW,   FLV_CODECID_PCM_ALAW   >> FLV_AUDIO_CODECID_OFFSET },
@@ -77,6 +95,7 @@ typedef enum {
     FLV_ADD_KEYFRAME_INDEX = (1 << 2),
     FLV_NO_METADATA = (1 << 3),
     FLV_NO_DURATION_FILESIZE = (1 << 4),
+    FLV_ENHANCED_HEADER = (1 << 5),
 } FLVFlags;
 
 typedef struct FLVFileposition {
@@ -129,6 +148,24 @@ typedef struct FLVContext {
     int metadata_pkt_written;
 } FLVContext;
 
+static int is_flv_enhanced_header_enable(FLVContext* flv, int codec_id) {
+    if ((flv->flags & FLV_ENHANCED_HEADER) == FLV_ENHANCED_HEADER) {
+        if ((codec_id == AV_CODEC_ID_HEVC) || (codec_id == AV_CODEC_ID_AV1) || (codec_id == AV_CODEC_ID_VP9)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const AVCodecTag* get_flv_video_codec_ids(FLVContext* flv) {
+    if ((flv->flags & FLV_ENHANCED_HEADER) == FLV_ENHANCED_HEADER) {
+        return flv_enhanced_video_codec_ids;
+    }
+    else {
+        return flv_video_codec_ids;
+    }
+}
+
 static int get_audio_flags(AVFormatContext *s, AVCodecParameters *par)
 {
     int flags = (par->bits_per_coded_sample == 16) ? FLV_SAMPLESSIZE_16BIT
@@ -137,6 +174,9 @@ static int get_audio_flags(AVFormatContext *s, AVCodecParameters *par)
     if (par->codec_id == AV_CODEC_ID_AAC) // specs force these parameters
         return FLV_CODECID_AAC | FLV_SAMPLERATE_44100HZ |
                FLV_SAMPLESSIZE_16BIT | FLV_STEREO;
+    else if (par->codec_id == AV_CODEC_ID_OPUS)
+        return FLV_CODECID_OPUS | FLV_SAMPLERATE_44100HZ |
+            FLV_SAMPLESSIZE_16BIT | FLV_STEREO;
     else if (par->codec_id == AV_CODEC_ID_SPEEX) {
         if (par->sample_rate != 16000) {
             av_log(s, AV_LOG_ERROR,
@@ -244,9 +284,9 @@ static void put_timestamp(AVIOContext *pb, int64_t ts) {
     avio_w8(pb, (ts >> 24) & 0x7F);
 }
 
-static void put_eos_tag(AVIOContext *pb, unsigned ts, enum AVCodecID codec_id)
+static void put_eos_tag(FLVContext* flv, AVIOContext *pb, unsigned ts, enum AVCodecID codec_id)
 {
-    uint32_t tag = ff_codec_get_tag(flv_video_codec_ids, codec_id);
+    uint32_t tag = ff_codec_get_tag(get_flv_video_codec_ids(flv), codec_id);
     /* ub[4] FrameType = 1, ub[4] CodecId */
     tag |= 1 << 4;
     avio_w8(pb, FLV_TAG_TYPE_VIDEO);
@@ -638,7 +678,8 @@ static void flv_write_codec_header(AVFormatContext* s, AVCodecParameters* par, i
 
     if (par->codec_id == AV_CODEC_ID_AAC || par->codec_id == AV_CODEC_ID_H264
             || par->codec_id == AV_CODEC_ID_MPEG4 || par->codec_id == AV_CODEC_ID_HEVC
-            || par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
+            || par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9
+            || par->codec_id == AV_CODEC_ID_VP8 || par->codec_id == AV_CODEC_ID_OPUS) {
         int64_t pos;
         avio_w8(pb,
                 par->codec_type == AVMEDIA_TYPE_VIDEO ?
@@ -680,13 +721,22 @@ static void flv_write_codec_header(AVFormatContext* s, AVCodecParameters* par, i
                         data[0], data[1]);
             }
             avio_write(pb, par->extradata, par->extradata_size);
+        }
+        else if (par->codec_id == AV_CODEC_ID_OPUS)
+        {
+            avio_w8(pb, get_audio_flags(s, par));
+            avio_w8(pb, 0); // opus sequence header
+            avio_write(pb, par->extradata, par->extradata_size);
         } else {
-            if (par->codec_id == AV_CODEC_ID_HEVC) {
-                avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeSequenceStart | FLV_FRAME_KEY); // ExVideoTagHeader mode with PacketTypeSequenceStart
-                avio_write(pb, "hvc1", 4);
-            } else if (par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
-                avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeSequenceStart | FLV_FRAME_KEY);
-                avio_write(pb, par->codec_id == AV_CODEC_ID_AV1 ? "av01" : "vp09", 4);
+            if (is_flv_enhanced_header_enable(flv, par->codec_id))
+            {
+                if (par->codec_id == AV_CODEC_ID_HEVC) {
+                    avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeSequenceStart | FLV_FRAME_KEY); // ExVideoTagHeader mode with PacketTypeSequenceStart
+                    avio_write(pb, "hvc1", 4);
+                } else if (par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
+                    avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeSequenceStart | FLV_FRAME_KEY);
+                    avio_write(pb, par->codec_id == AV_CODEC_ID_AV1 ? "av01" : "vp09", 4);
+                }
             } else {
                 avio_w8(pb, par->codec_tag | FLV_FRAME_KEY); // flags
                 avio_w8(pb, 0); // AVC sequence header
@@ -697,7 +747,7 @@ static void flv_write_codec_header(AVFormatContext* s, AVCodecParameters* par, i
                 ff_isom_write_hvcc(pb, par->extradata, par->extradata_size, 0);
             else if (par->codec_id == AV_CODEC_ID_AV1)
                 ff_isom_write_av1c(pb, par->extradata, par->extradata_size, 1);
-            else if (par->codec_id == AV_CODEC_ID_VP9)
+            else if (par->codec_id == AV_CODEC_ID_VP9 || par->codec_id == AV_CODEC_ID_VP8)
                 ff_isom_write_vpcc(s, pb, par->extradata, par->extradata_size, par);
             else
                 ff_isom_write_avcc(pb, par->extradata, par->extradata_size);
@@ -792,7 +842,7 @@ static int flv_init(struct AVFormatContext *s)
                 return AVERROR(EINVAL);
             }
             flv->video_par = par;
-            if (!ff_codec_get_tag(flv_video_codec_ids, par->codec_id))
+            if (!ff_codec_get_tag(get_flv_video_codec_ids(flv), par->codec_id))
                 return unsupported_codec(s, "Video", par->codec_id);
 
             if (par->codec_id == AV_CODEC_ID_MPEG4 ||
@@ -948,7 +998,7 @@ end:
             AVCodecParameters *par = s->streams[i]->codecpar;
             if (par->codec_type == AVMEDIA_TYPE_VIDEO &&
                     (par->codec_id == AV_CODEC_ID_H264 || par->codec_id == AV_CODEC_ID_MPEG4))
-                put_eos_tag(pb, flv->last_ts[i], par->codec_id);
+                put_eos_tag(flv, pb, flv->last_ts[i], par->codec_id);
         }
     }
 
@@ -996,21 +1046,23 @@ static int flv_write_packet(AVFormatContext *s, AVPacket *pkt)
     }
 
     if (par->codec_id == AV_CODEC_ID_VP6F || par->codec_id == AV_CODEC_ID_VP6A ||
-        par->codec_id == AV_CODEC_ID_VP6  || par->codec_id == AV_CODEC_ID_AAC)
+        par->codec_id == AV_CODEC_ID_VP6  || par->codec_id == AV_CODEC_ID_AAC ||
+        par->codec_id == AV_CODEC_ID_OPUS)
         flags_size = 2;
     else if (par->codec_id == AV_CODEC_ID_H264 || par->codec_id == AV_CODEC_ID_MPEG4 ||
              par->codec_id == AV_CODEC_ID_HEVC || par->codec_id == AV_CODEC_ID_AV1 ||
-             par->codec_id == AV_CODEC_ID_VP9)
+             par->codec_id == AV_CODEC_ID_VP8 || par->codec_id == AV_CODEC_ID_VP9)
         flags_size = 5;
     else
         flags_size = 1;
 
-    if (par->codec_id == AV_CODEC_ID_HEVC && pkt->pts != pkt->dts)
+    if (is_flv_enhanced_header_enable(flv, AV_CODEC_ID_HEVC) && par->codec_id == AV_CODEC_ID_HEVC && pkt->pts != pkt->dts)
         flags_size += 3;
 
     if (par->codec_id == AV_CODEC_ID_AAC || par->codec_id == AV_CODEC_ID_H264
             || par->codec_id == AV_CODEC_ID_MPEG4 || par->codec_id == AV_CODEC_ID_HEVC
-            || par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
+            || par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9
+            || par->codec_id == AV_CODEC_ID_VP8 || par->codec_id == AV_CODEC_ID_OPUS) {
         size_t side_size;
         uint8_t *side = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
         if (side && side_size > 0 && (side_size != par->extradata_size || memcmp(side, par->extradata, side_size))) {
@@ -1033,7 +1085,7 @@ static int flv_write_packet(AVFormatContext *s, AVPacket *pkt)
     }
     if (par->codec_id == AV_CODEC_ID_H264 || par->codec_id == AV_CODEC_ID_MPEG4 ||
         par->codec_id == AV_CODEC_ID_HEVC ||  par->codec_id == AV_CODEC_ID_AV1 ||
-        par->codec_id == AV_CODEC_ID_VP9) {
+        par->codec_id == AV_CODEC_ID_VP8 || par->codec_id == AV_CODEC_ID_VP9) {
         if (pkt->pts == AV_NOPTS_VALUE) {
             av_log(s, AV_LOG_ERROR, "Packet is missing PTS\n");
             return AVERROR(EINVAL);
@@ -1054,7 +1106,7 @@ static int flv_write_packet(AVFormatContext *s, AVPacket *pkt)
     case AVMEDIA_TYPE_VIDEO:
         avio_w8(pb, FLV_TAG_TYPE_VIDEO);
 
-        flags = ff_codec_get_tag(flv_video_codec_ids, par->codec_id);
+        flags = ff_codec_get_tag(get_flv_video_codec_ids(flv), par->codec_id);
 
         flags |= frametype;
         break;
@@ -1143,15 +1195,18 @@ static int flv_write_packet(AVFormatContext *s, AVPacket *pkt)
         avio_wb32(pb, data_size + 11);
     } else {
         av_assert1(flags>=0);
-        if (par->codec_id == AV_CODEC_ID_HEVC) {
-            int pkttype = (pkt->pts != pkt->dts) ? PacketTypeCodedFrames : PacketTypeCodedFramesX;
-            avio_w8(pb, FLV_IS_EX_HEADER | pkttype | frametype); // ExVideoTagHeader mode with PacketTypeCodedFrames(X)
-            avio_write(pb, "hvc1", 4);
-            if (pkttype == PacketTypeCodedFrames)
-                avio_wb24(pb, pkt->pts - pkt->dts);
-        } else if (par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
-            avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeCodedFrames | frametype);
-            avio_write(pb, par->codec_id == AV_CODEC_ID_AV1 ? "av01" : "vp09", 4);
+        if (is_flv_enhanced_header_enable(flv, par->codec_id))
+        {
+            if (par->codec_id == AV_CODEC_ID_HEVC) {
+                int pkttype = (pkt->pts != pkt->dts) ? PacketTypeCodedFrames : PacketTypeCodedFramesX;
+                avio_w8(pb, FLV_IS_EX_HEADER | pkttype | frametype); // ExVideoTagHeader mode with PacketTypeCodedFrames(X)
+                avio_write(pb, "hvc1", 4);
+                if (pkttype == PacketTypeCodedFrames)
+                    avio_wb24(pb, pkt->pts - pkt->dts);
+            } else if (par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
+                avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeCodedFrames | frametype);
+                avio_write(pb, par->codec_id == AV_CODEC_ID_AV1 ? "av01" : "vp09", 4);
+            }
         } else {
             avio_w8(pb, flags);
         }
@@ -1163,11 +1218,16 @@ static int flv_write_packet(AVFormatContext *s, AVPacket *pkt)
             else
                 avio_w8(pb, ((FFALIGN(par->width,  16) - par->width) << 4) |
                              (FFALIGN(par->height, 16) - par->height));
-        } else if (par->codec_id == AV_CODEC_ID_AAC)
+        } else if (par->codec_id == AV_CODEC_ID_AAC || par->codec_id == AV_CODEC_ID_OPUS)
             avio_w8(pb, 1); // AAC raw
-        else if (par->codec_id == AV_CODEC_ID_H264 || par->codec_id == AV_CODEC_ID_MPEG4) {
-            avio_w8(pb, 1); // AVC NALU
-            avio_wb24(pb, pkt->pts - pkt->dts);
+        else if (par->codec_id == AV_CODEC_ID_H264 || par->codec_id == AV_CODEC_ID_MPEG4
+              || par->codec_id == AV_CODEC_ID_HEVC || par->codec_id == AV_CODEC_ID_VP8
+              || par->codec_id == AV_CODEC_ID_VP9 || par->codec_id == AV_CODEC_ID_AV1) {
+            if (!is_flv_enhanced_header_enable(flv, par->codec_id))
+            {
+                avio_w8(pb, 1); // AVC NALU
+                avio_wb24(pb, pkt->pts - pkt->dts);
+            }
         }
 
         avio_write(pb, data ? data : pkt->data, size);
@@ -1243,6 +1303,7 @@ static const AVOption options[] = {
     { "no_metadata", "disable metadata for FLV", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_NO_METADATA}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },
     { "no_duration_filesize", "disable duration and filesize zero value metadata for FLV", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_NO_DURATION_FILESIZE}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },
     { "add_keyframe_index", "Add keyframe index metadata", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_ADD_KEYFRAME_INDEX}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },
+    { "enhanced_header", "enable enhanced header", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_ENHANCED_HEADER}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, "flvflags" },
     { NULL },
 };
 

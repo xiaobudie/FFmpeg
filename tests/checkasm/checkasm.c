@@ -41,6 +41,9 @@
 #if HAVE_IO_H
 #include <io.h>
 #endif
+#if HAVE_PRCTL
+#include <sys/prctl.h>
+#endif
 
 #if defined(_WIN32) && !defined(SIGBUS)
 /* non-standard, use the same value as mingw-w64 */
@@ -248,6 +251,7 @@ static const struct {
 #endif
 #if CONFIG_SWSCALE
     { "sw_gbrp", checkasm_check_sw_gbrp },
+    { "sw_range_convert", checkasm_check_sw_range_convert },
     { "sw_rgb", checkasm_check_sw_rgb },
     { "sw_scale", checkasm_check_sw_scale },
 #endif
@@ -819,8 +823,7 @@ static int bench_init(void)
 static void bench_uninit(void)
 {
 #if CONFIG_LINUX_PERF
-    if (state.sysfd > 0)
-        close(state.sysfd);
+    close(state.sysfd);
 #endif
 }
 
@@ -846,6 +849,9 @@ int main(int argc, char *argv[])
     sigaction(SIGFPE,  &signal_handler_act, NULL);
     sigaction(SIGILL,  &signal_handler_act, NULL);
     sigaction(SIGSEGV, &signal_handler_act, NULL);
+#endif
+#if HAVE_PRCTL && defined(PR_SET_UNALIGN)
+    prctl(PR_SET_UNALIGN, PR_UNALIGN_SIGBUS);
 #endif
 #if ARCH_ARM && HAVE_ARMV5TE_EXTERNAL
     if (have_vfp(av_get_cpu_flags()) || have_neon(av_get_cpu_flags()))
